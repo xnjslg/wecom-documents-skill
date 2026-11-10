@@ -1,0 +1,107 @@
+{
+  "sha256": "305967f575bc139b13975d080f620103993b65a6bbef9672c07d3f036743c59f",
+  "capi_base_size": "0xd0",
+  "wrapper_cpp_vtable_rva": "0xc61fc40",
+  "methods": [
+    {
+      "capi_offset": "0x8",
+      "function_rva": "0x2a706a0"
+    },
+    {
+      "capi_offset": "0x10",
+      "function_rva": "0x2a706e0"
+    },
+    {
+      "capi_offset": "0x18",
+      "function_rva": "0x2a6d940"
+    },
+    {
+      "capi_offset": "0x20",
+      "function_rva": "0x2a6d980"
+    },
+    {
+      "capi_offset": "0x28",
+      "function_rva": "0x2a6dee0"
+    },
+    {
+      "capi_offset": "0x30",
+      "function_rva": "0x2a6f1f0"
+    },
+    {
+      "capi_offset": "0x38",
+      "function_rva": "0x2a6f370"
+    },
+    {
+      "capi_offset": "0x40",
+      "function_rva": "0x2a6f400"
+    },
+    {
+      "capi_offset": "0x48",
+      "function_rva": "0x2a6f490"
+    },
+    {
+      "capi_offset": "0x50",
+      "function_rva": "0x2a6f520"
+    },
+    {
+      "capi_offset": "0x58",
+      "function_rva": "0x2a6f5b0"
+    },
+    {
+      "capi_offset": "0x60",
+      "function_rva": "0x2a6f640"
+    },
+    {
+      "capi_offset": "0x68",
+      "function_rva": "0x2a6f6d0"
+    },
+    {
+      "capi_offset": "0x70",
+      "function_rva": "0x2a6f760"
+    },
+    {
+      "capi_offset": "0x78",
+      "function_rva": "0x2a6f7f0"
+    },
+    {
+      "capi_offset": "0x80",
+      "function_rva": "0x2a6f880"
+    },
+    {
+      "capi_offset": "0x88",
+      "function_rva": "0x2a6f990"
+    },
+    {
+      "capi_offset": "0x90",
+      "function_rva": "0x2a6fa20"
+    },
+    {
+      "capi_offset": "0x98",
+      "function_rva": "0x2a6fab0"
+    },
+    {
+      "capi_offset": "0xa0",
+      "function_rva": "0x2a6fc30"
+    },
+    {
+      "capi_offset": "0xa8",
+      "function_rva": "0x2a6fdb0"
+    },
+    {
+      "capi_offset": "0xb0",
+      "function_rva": "0x2a6ff90"
+    },
+    {
+      "capi_offset": "0xb8",
+      "function_rva": "0x2a70170"
+    },
+    {
+      "capi_offset": "0xc0",
+      "function_rva": "0x2a70210"
+    },
+    {
+      "capi_offset": "0xc8",
+      "function_rva": "0x2a703f0"
+    }
+  ]
+}

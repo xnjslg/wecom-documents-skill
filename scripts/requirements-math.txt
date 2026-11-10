@@ -1,0 +1,3 @@
+latex2mathml
+python-docx
+lxml

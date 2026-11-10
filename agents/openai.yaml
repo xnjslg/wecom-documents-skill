@@ -1,0 +1,4 @@
+interface:
+  display_name: "企微在线文档"
+  short_description: "读取、编辑和重排企微在线文档，设置标题、列表、表格及原生代码块，处理图片和公式"
+  default_prompt: "使用 $wecom-documents 读取指定企微文档，按要求局部编辑或重新排版，并回读核验内容与格式。"

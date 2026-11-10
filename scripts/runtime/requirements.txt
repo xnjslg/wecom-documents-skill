@@ -1,0 +1,2 @@
+# Requires 64-bit Windows Python >= 3.11
+frida==17.25.2
