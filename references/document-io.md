@@ -4,7 +4,7 @@
 
 ## 只读正文
 
-需求审阅、内容对照和正文提取优先请求 Markdown，不要求文档已在企微编辑器中打开。以下示例用无 BOM 的 UTF-8 保存请求，兼容 Windows PowerShell 5.1：
+仅提取正文时请求 Markdown，不要求文档已在企微编辑器中打开。需求审阅和文档对照使用完整快照，结合 OOXML 核对可能影响含义的文字样式，图片下载另按用户选择执行。以下示例用无 BOM 的 UTF-8 保存请求，兼容 Windows PowerShell 5.1：
 
 ```powershell
 $doc = Join-Path (Get-Location) 'scripts\document.ps1'
@@ -42,6 +42,24 @@ $doc = Join-Path (Get-Location) "scripts\document.ps1"
 | flowchart_pages | `docid` | 获取独立流程图画布 `sub_id` |
 
 `overwrite_doc_id` 是全文覆盖。公式素材导入用单独的临时 docid；原文局部修改走编辑器 SDK。DTO `OaUpdateRequest` 在已验证 schema 中只属于新建文档的 `doc_requests`，不能据此编造现有文档的局部更新路径。
+
+## 文档图片下载
+
+先完成正文读取，不等待用户选择图片选项。任务已包含图片下载或图文审阅时直接下载，否则先保存图片引用，完成后说明下载与审图状态，再按未覆盖的内容询问是否需要补做。使用已有 `snapshot/markdown.json` 或 `io` 读取 Markdown 后返回的 `result_json`，不为下载图片重复抓取整份文档。
+
+```powershell
+# 不带下载参数时只建立图片索引，不发起图片网络请求。
+& $python .\scripts\document_images.py --input C:/任务目录/markdown.json --output C:/任务目录/image-index
+
+# 任务包含图片下载时，显式添加参数；输出目录须为新目录。
+& $python .\scripts\document_images.py --input C:/任务目录/markdown.json --output C:/任务目录/image-download --download-images
+```
+
+脚本使用 Python 标准库，可在 Windows 虚拟环境或能够读取已保存响应的其他 Python 环境中执行，无需连接企微编辑器。当前支持原生正文中的 Markdown 图片和 HTML `img` 引用，以及企微 `qpic.cn` HTTPS CDN 上的 PNG、JPEG、GIF 和 WebP 原图。其他地址或格式记录为失败，不猜测凭据或改用无关下载通道。
+
+输出包含 `document.original.md`、使用本地图片引用的 `document.local.md`、原图目录和 `images.json`。索引按 URL 去重下载，保留每次引用的行号、说明和附近文字，并记录字节数、SHA-256、可识别的尺寸及失败原因。原生 Markdown 与 OOXML 快照保持原样，局部编辑仍使用原始快照。
+
+回执分别给出引用数、独立图片数、下载成功数和失败数。`visual_reviewed=false` 表示下载工具尚未阅读图片；不能将下载成功表述为已核对图文。不下载时说明本次未包含图片内容，样式核验则仍按 OOXML 执行，两者分别报告。
 
 ## 文件与图片上传
 

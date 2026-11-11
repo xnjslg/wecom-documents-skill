@@ -11,6 +11,8 @@ A local AI skill for reading, creating, editing, and formatting WeCom online Wor
 | 功能 | 支持范围 |
 | --- | --- |
 | 文档读写 | 读取、新建、追加、导入文件；按明确范围局部编辑 |
+| 文档审阅 | 结合正文与 OOXML 核对颜色、底色、删除线及其他文字样式，按文档约定解释含义 |
+| 图片读取 | 建立图片索引，按需下载原图并生成使用本地图片的 Markdown，保留来源位置和下载结果 |
 | 标题与文字 | 一级、二级标题；粗体、斜体、下划线、删除线、字体、字号、颜色、底色、上下标 |
 | 段落与列表 | 居中、左缩进、段间距、已验证行距；引用、数字列表、符号列表、任务列表及完成状态 |
 | 表格 | 插入原生表格、填写单元格、设置表头格式 |
@@ -84,7 +86,7 @@ $env:WECOM_DOCUMENT_PYTHON = $python
 
 只需正文时，优先使用 `io --operation read` 请求 Markdown，无需先在企微编辑器中打开文档；请求示例见 [只读正文](references/document-io.md#只读正文)。
 
-需要原生结构或准备编辑时，使用快照和编辑器状态命令。将 `<docid>` 替换为 `https://doc.weixin.qq.com/doc/<docid>` 中的文档 ID；`state` 要求目标文档已在编辑器中打开：
+需求审阅、文档对照和原生结构检查使用完整快照，结合 OOXML 核对可能影响含义的文字样式；准备编辑时再读取编辑器状态。将 `<docid>` 替换为 `https://doc.weixin.qq.com/doc/<docid>` 中的文档 ID；`state` 要求目标文档已在编辑器中打开：
 
 ```powershell
 .\scripts\document.ps1 snapshot --doc-id '<docid>'
@@ -94,6 +96,14 @@ $env:WECOM_DOCUMENT_PYTHON = $python
 局部编辑需要使用当前快照、编辑器状态和实际目标位置生成表达式，再按 [SKILL.md](SKILL.md) 的流程执行与核验。编辑位置不是 Markdown 字符下标。
 
 快照返回 `snapshot_partial`、`complete=false` 时，表示正文已核验保存，但后续 OOXML 请求失败；已取得正文可用于只读审阅，结果同时提供缺失格式和错误记录。局部编辑仍要求完整快照。详见 [部分读取失败](references/document-io.md#部分读取失败)。
+
+图片工具使用已保存的原生 Markdown 响应。默认只建立索引；需要下载时添加 `--download-images`，输出目录须为新目录：
+
+```powershell
+& $python .\scripts\document_images.py --input C:/任务目录/markdown.json --output C:/任务目录/image-download --download-images
+```
+
+当前支持企微 `qpic.cn` HTTPS CDN 上的 PNG、JPEG、GIF 和 WebP 图片。同一 URL 去重下载，并记录引用位置、文件摘要和失败原因。下载成功不代表已查看图片内容；图文审阅还需打开图片核对。详见 [文档图片下载](references/document-io.md#文档图片下载)。
 
 ## 结果与数据存放
 
@@ -121,6 +131,7 @@ $env:WECOM_DOCUMENT_PYTHON = $python
 | [scripts/document.ps1](scripts/document.ps1) / [document.py](scripts/document.py) | 统一调用入口 |
 | [scripts/make_edit.py](scripts/make_edit.py) | 根据明确参数生成编辑表达式 |
 | [scripts/audit_outside.py](scripts/audit_outside.py) | 核对目标范围以外的文档结构 |
+| [scripts/document_images.py](scripts/document_images.py) | 从已保存正文建立图片索引，按需下载并生成本地图片引用 |
 | [references/formatting.md](references/formatting.md) | 排版、表格、代码块参数与验证范围 |
 | [references/document-io.md](references/document-io.md) | 读取、新建、导入与图片上传 |
 | [references/math.md](references/math.md) | 可编辑数学公式 |
