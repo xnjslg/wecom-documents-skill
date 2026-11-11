@@ -17,11 +17,17 @@ description: 使用当前 Windows 企业微信登录会话读取、新建、局�
 
 ```powershell
 .\scripts\document.ps1 probe
-.\scripts\document.ps1 snapshot --doc-id '<docid>'
-.\scripts\document.ps1 state --doc-id '<docid>'
 ```
 
-从 `https://doc.weixin.qq.com/doc/<docid>` 提取 Word 文档 ID。`snapshot` 返回本地原始快照路径、正文摘要和 SHA-256，正文按需读取。运行结果显示多个编辑器实例时，用返回的实际 `browser_id` 再查询其状态；选择内容、版本及目标范围均匹配的实例并记录选择。
+从 `https://doc.weixin.qq.com/doc/<docid>` 提取 Word 文档 ID，按任务选择读取方式：
+
+- 只读审阅、需求对照或提取正文：优先用 `io --operation read` 请求 `content_type=markdown`，无需先在企微中打开文档。请求示例和返回校验见 [references/document-io.md](references/document-io.md#只读正文)。
+- 检查原生表格、公式和样式，或准备局部编辑：用 `snapshot --doc-id '<docid>'` 保存 Markdown 与 OOXML，返回原始快照路径和正文 SHA-256。
+- 定位编辑器、选区或版本：用 `state --doc-id '<docid>'`。这类编辑器操作才要求目标文档已打开；`DocumentNotOpenError` 不代表原生正文读取失败。
+
+`snapshot` 返回 `snapshot_saved` 表示两种格式齐全；`snapshot_partial`、`complete=false` 表示正文已核验保存，但后续 OOXML 请求失败。部分成功结果直接返回正文路径、SHA-256、缺失格式和错误记录，可继续用于只读审阅。编辑流程仍要求完整快照，处理方法见 [部分读取失败](references/document-io.md#部分读取失败)。
+
+运行结果显示多个编辑器实例时，用返回的实际 `browser_id` 再查询其状态；选择内容、版本及目标范围均匹配的实例并记录选择。
 
 原生 OOXML 响应中的 `content` 或 `file_path` 保存 JSON 文本，两字段互斥；本适配链的 `file_path` 值不是磁盘路径。用离线工具检查：
 

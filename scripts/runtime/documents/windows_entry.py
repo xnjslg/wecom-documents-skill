@@ -111,15 +111,35 @@ def payload_text(envelope: dict, kind: str) -> tuple[str, str]:
     return text, fields[0]
 
 
-def take_snapshot(job: dict, attempt: Attempt, label: str) -> dict:
+def take_snapshot(job: dict, attempt: Attempt, label: str, *, allow_partial: bool = False) -> dict:
     docid = docid_value(job)
     pid = positive_pid('WECOM_DOCUMENT_AGENT_PID', required=True)
     directory = attempt.output / label
     directory.mkdir(mode=0o700)
     metadata = {}
+    errors = {}
     with DocumentSession(pid, directory / 'native') as session:
         for kind in ('markdown', 'ooxml'):
-            envelope = session.call('read', {'docid': docid, 'content_type': kind})
+            try:
+                envelope = session.call('read', {'docid': docid, 'content_type': kind})
+            except (ApiError, TimeoutError) as error:
+                failure = {'format': kind, 'error_type': type(error).__name__,
+                           'message': str(error), 'traceback': traceback.format_exc()}
+                if isinstance(error, ApiError):
+                    failure['api_error_code'] = error.code
+                error_path = directory / f'{kind}-error.json'
+                with error_path.open('x', encoding='utf-8') as stream:
+                    json.dump(failure, stream, ensure_ascii=False, indent=2)
+                    stream.write('\n')
+                # Editing requires both formats. A standalone read can use an
+                # already validated body when the supplemental request fails.
+                if not allow_partial or not metadata:
+                    raise
+                errors[kind] = {'error_type': failure['error_type'],
+                                'error_json': attempt.location(error_path)}
+                if isinstance(error, ApiError):
+                    errors[kind]['api_error_code'] = error.code
+                break
             envelope_path = directory / f'{kind}.json'
             with envelope_path.open('x', encoding='utf-8') as stream:
                 json.dump(envelope, stream, ensure_ascii=False, indent=2)
@@ -136,6 +156,10 @@ def take_snapshot(job: dict, attempt: Attempt, label: str) -> dict:
             metadata[kind + '_sha256'] = hashlib.sha256(text.encode('utf-8')).hexdigest()
             metadata[kind + '_characters'] = len(text)
             metadata[kind + '_payload_field'] = field
+    available = [kind for kind in ('markdown', 'ooxml') if kind + '_content' in metadata]
+    metadata.update(complete=len(available) == 2, available_formats=available,
+                    missing_formats=[kind for kind in ('markdown', 'ooxml') if kind not in available],
+                    format_errors=errors)
     return metadata
 
 
@@ -301,7 +325,8 @@ def execute_job(job: dict, attempt: Attempt) -> dict:
                   'binaries': binaries, 'document_binding_verified': False,
                   'editor_connection': 'not_checked; run state with the target docid'}
     elif command == 'snapshot':
-        result = {'status': 'snapshot_saved', **take_snapshot(job, attempt, 'snapshot')}
+        snapshot = take_snapshot(job, attempt, 'snapshot', allow_partial=True)
+        result = {'status': 'snapshot_saved' if snapshot['complete'] else 'snapshot_partial', **snapshot}
     elif command == 'io':
         operation = required_string(job, 'operation')
         request = job.get('request')
@@ -377,7 +402,10 @@ def main(argv: list[str] | None = None) -> int:
             raise DocumentJobError('Malformed document job or unexpected job field')
         attempt = Attempt(job)
         result = execute_job(job, attempt)
-        if attempt.state['status'] != 'written_needs_audit':
+        if result.get('status') == 'snapshot_partial':
+            attempt.phase('partial', available_formats=result['available_formats'],
+                          missing_formats=result['missing_formats'])
+        elif attempt.state['status'] != 'written_needs_audit':
             attempt.phase('completed')
         attempt.save('summary.json', result)
         print(json.dumps(result, ensure_ascii=False), flush=True)

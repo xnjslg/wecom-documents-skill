@@ -2,7 +2,25 @@
 
 入口：`scripts/document.ps1`。每次创建新的私有运行目录，标准输出只给元数据与结果文件路径。
 
-`snapshot --doc-id ID` 保存 Markdown 与 OOXML 原始响应，返回 Markdown 正文的 SHA-256。源文件中内容字段为 `content` 或 `file_path`，只能有一个。OOXML 字段值还需 JSON 解析一次，得到 `Document` 树；不用这个字段值访问文件系统。
+## 只读正文
+
+需求审阅、内容对照和正文提取优先请求 Markdown，不要求文档已在企微编辑器中打开。以下示例用无 BOM 的 UTF-8 保存请求，兼容 Windows PowerShell 5.1：
+
+```powershell
+$doc = Join-Path (Get-Location) 'scripts\document.ps1'
+$requestPath = Join-Path $env:TEMP ('wecom-read-' + [guid]::NewGuid().ToString('N') + '.json')
+$request = @{docid = '<docid>'; content_type = 'markdown'} | ConvertTo-Json -Compress
+[IO.File]::WriteAllText($requestPath, $request, [Text.UTF8Encoding]::new($false))
+& $doc io --operation read --request $requestPath
+```
+
+从回执的 `result_json` 读取实际响应，核对 `errcode=0`，并确认响应 `url` 的主机为 `doc.weixin.qq.com`、路径为目标 `/doc/<docid>`。查询参数可以与输入链接不同。响应中的 `name` 可用于核对标题。
+
+正文取自 `content` 或 `file_path`，两字段互斥且值为文本；本适配链的 `file_path` 值不是磁盘路径。按需分段读取长正文，避免终端输出截断造成漏读。Markdown 会展开部分表格、不能完整保留样式，涉及这些结构时再补读 OOXML。
+
+## 完整快照与其他操作
+
+`snapshot --doc-id ID` 依次保存 Markdown 与 OOXML 原始响应，返回 Markdown 正文的 SHA-256。OOXML 字段值还需 JSON 解析一次，得到 `Document` 树，不用这个字段值访问文件系统。局部编辑和原生结构审计使用完整快照。
 
 ```powershell
 $doc = Join-Path (Get-Location) "scripts\document.ps1"
@@ -41,5 +59,13 @@ $doc = Join-Path (Get-Location) "scripts\document.ps1"
 ## 异步与不确定响应
 
 适配器自动保持同一 trace ID 查询 `/task/query` 的 `taskid`，直到 `long_task_poll.done=true`。只读操作的 `10004` 有界重试；写入不自动重放。写入失败或超时时先取新快照，确认已执行情况再安排剩余动作。
+
+### 部分读取失败
+
+`snapshot` 依次读取两种格式。Markdown 已核验并保存后，若 OOXML 请求返回接口错误或超时，命令返回 `ok=true`、`status=snapshot_partial`、`complete=false`，进程退出码为 0。结果中的 `markdown_content` 与 `markdown_sha256` 指向已取得的正文，`available_formats`、`missing_formats` 列出格式状态，`format_errors` 返回错误类型、接口错误码及错误记录路径。
+
+- 部分成功可继续用于只读审阅，报告正文读取成功及缺失格式，不把 OOXML 请求失败报告成“文档无法读取”。旧运行记录只显示整次失败时，检查 `failure.json`、原始 HTTP 和 `snapshot/` 下的产物；已保存的 `markdown.json` 与 `markdown.txt` 须按上述响应规则重新核对。
+- 需要补读时，用 `io --operation read` 只请求缺少的格式，保留已成功取得的内容，避免重复抓取完整快照。写入前仍按局部编辑流程重新取得完整快照和最新版本。
+- Markdown 请求失败、响应文档不符或内容校验失败时，仍返回失败。原始错误响应、异步任务未完成或文件存在本身均不构成正文读取成功。`apply` 的写前与写后快照保持严格模式，不能使用部分成功结果跳过结构校验。
 
 当前链路调用 DOCX 导出曾返回 `48002`，要求客户端沙箱 Python 环境。没有可用沙箱时直接采用已验证局部编辑链，不伪造运行环境或认证字段。

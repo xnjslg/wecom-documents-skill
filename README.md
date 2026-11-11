@@ -82,7 +82,9 @@ $env:WECOM_DOCUMENT_PYTHON = $python
 公式：<LaTeX 内容>
 ```
 
-也可以直接使用脚本检查文档。将 `<docid>` 替换为 `https://doc.weixin.qq.com/doc/<docid>` 中的文档 ID：
+只需正文时，优先使用 `io --operation read` 请求 Markdown，无需先在企微编辑器中打开文档；请求示例见 [只读正文](references/document-io.md#只读正文)。
+
+需要原生结构或准备编辑时，使用快照和编辑器状态命令。将 `<docid>` 替换为 `https://doc.weixin.qq.com/doc/<docid>` 中的文档 ID；`state` 要求目标文档已在编辑器中打开：
 
 ```powershell
 .\scripts\document.ps1 snapshot --doc-id '<docid>'
@@ -90,6 +92,8 @@ $env:WECOM_DOCUMENT_PYTHON = $python
 ```
 
 局部编辑需要使用当前快照、编辑器状态和实际目标位置生成表达式，再按 [SKILL.md](SKILL.md) 的流程执行与核验。编辑位置不是 Markdown 字符下标。
+
+快照返回 `snapshot_partial`、`complete=false` 时，表示正文已核验保存，但后续 OOXML 请求失败；已取得正文可用于只读审阅，结果同时提供缺失格式和错误记录。局部编辑仍要求完整快照。详见 [部分读取失败](references/document-io.md#部分读取失败)。
 
 ## 结果与数据存放
 
