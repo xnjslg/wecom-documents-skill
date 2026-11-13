@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import time
 import uuid
 
 from client import ApiError, Client, ProtocolError, decode_mcp_result
+from documents.diagnostics import event
 
 BASE = Path(__file__).resolve().parents[1]
 ROUTES = {
@@ -24,7 +26,9 @@ ROUTES = {
     'flowchart_pages': {'path': '/doc/flowcharts/pages/list', 'keys': ['docid']},
     'poll': {'path': '/task/query', 'keys': ['taskid']},
 }
-READ_OPERATIONS = frozenset(('read', 'flowchart_pages', 'poll'))
+READ_OPERATIONS = frozenset(('discovery', 'read', 'flowchart_pages', 'poll'))
+# Retries are opt-in and add at most three seconds of scheduled waiting.
+READ_RETRY_DELAYS = (1, 2)
 UPLOAD_TOOLS = frozenset(('upload_media', 'upload_doc_media'))
 
 
@@ -51,18 +55,23 @@ rpc.exports.documentupload = async function(name,args) {
 
 
 class DocumentSession:
-    def __init__(self, pid: int, output: Path):
+    def __init__(self, pid: int, output: Path, *, read_attempts: int = 1):
         if type(pid) is not int or pid <= 0:
             raise ValueError('A positive current WeCom agent PID is required')
+        if type(read_attempts) is not int or not 1 <= read_attempts <= 3:
+            raise ValueError('read_attempts must be an integer from 1 to 3')
+        self.read_attempts = read_attempts
         self.output = output
         self.output.mkdir(mode=0o700, parents=False, exist_ok=False)
         self.count = 0
         source = native_source()
+        event(self.output, 'native_attach_started', agent_pid=pid)
         self.client = Client(pid)
         try:
             self.client.script.unload()
             self.client.script = self.client.session.create_script(source)
             self.client.script.load()
+            event(self.output, 'native_attach_completed', agent_pid=pid)
         except BaseException as error:
             self.client.close(error)
             raise
@@ -77,14 +86,16 @@ class DocumentSession:
         return path
 
     def capabilities(self) -> dict:
+        event(self.output, 'tools_list_started')
         names = self.client.tool_names()
+        event(self.output, 'tools_list_completed', tool_count=len(names))
         result = {'native_bridge_available': 'wecom_tool' in names,
                   'upload_media_available': 'upload_media' in names,
                   'upload_doc_media_available': 'upload_doc_media' in names,
                   'document_routes': {}}
         if 'wecom_tool' not in names:
             return result
-        api = self.raw('discovery', {'service': 'doc'}, uuid.uuid4().hex)
+        api = self._request('discovery', {'service': 'doc'}, uuid.uuid4().hex)
         service = api.get('result')
         if isinstance(service, str):
             service = json.loads(service)
@@ -113,6 +124,35 @@ class DocumentSession:
         return decode_mcp_result(raw.encode('latin1'))
 
     def raw(self, operation: str, parameters: dict, trace: str) -> dict:
+        started = time.monotonic()
+        metadata = {'operation': operation, 'trace_id': trace,
+                    'path': '/service/discovery' if operation == 'discovery' else ROUTES[operation]['path'],
+                    'parameter_keys': sorted(parameters)}
+        if parameters.get('content_type') in ('markdown', 'ooxml'):
+            metadata['content_type'] = parameters['content_type']
+        event(self.output, 'request_started', **metadata)
+        previous_count = self.count
+        try:
+            api = self._raw(operation, parameters, trace)
+        except Exception as error:
+            detail = {'error_type': type(error).__name__}
+            if isinstance(error, ApiError):
+                detail['api_error_code'] = error.code
+                callid = re.search(r'callid:\s*(\d+)', error.message)
+                if callid:
+                    detail['call_id'] = callid.group(1)
+            if self.count > previous_count:
+                detail['response_file'] = f'{self.count:03d}-{operation}.http'
+            event(self.output, 'request_failed', **metadata, **detail,
+                  elapsed_ms=round((time.monotonic() - started) * 1000))
+            raise
+        event(self.output, 'request_completed', **metadata,
+              elapsed_ms=round((time.monotonic() - started) * 1000),
+              response_file=f'{self.count:03d}-{operation}.http',
+              asynchronous=bool(api.get('taskid')))
+        return api
+
+    def _raw(self, operation: str, parameters: dict, trace: str) -> dict:
         rpc = self._capture(operation, self.client.script.exports_sync.query(operation, parameters, trace))
         content = rpc.get('content')
         if rpc.get('isError') or not isinstance(content, list) or len(content) != 1:
@@ -132,15 +172,26 @@ class DocumentSession:
                 raise ApiError(error['code'], error['message'])
         return api
 
-    def _request(self, operation: str, parameters: dict, trace: str) -> dict:
-        attempts = 3 if operation in READ_OPERATIONS else 1
+    def _request(self, operation: str, parameters: dict, trace: str, *, deadline: float | None = None) -> dict:
+        attempts = self.read_attempts if operation in READ_OPERATIONS else 1
+        delays = READ_RETRY_DELAYS
         for attempt in range(attempts):
             try:
-                return self.raw(operation, parameters, trace)
+                api = self.raw(operation, parameters, trace)
             except ApiError as error:
                 if error.code != 10004 or attempt + 1 == attempts:
                     raise
-                time.sleep(attempt + 1)
+                delay = delays[attempt]
+                if deadline is not None and time.monotonic() + delay >= deadline:
+                    raise
+                event(self.output, 'read_retry_scheduled', operation=operation, trace_id=trace,
+                      next_attempt=attempt + 2, max_attempts=attempts, delay_seconds=delay)
+                time.sleep(delay)
+            else:
+                if attempt:
+                    event(self.output, 'read_retry_recovered', operation=operation, trace_id=trace,
+                          attempts_used=attempt + 1)
+                return api
         raise AssertionError('Unreachable document request state')
 
     def call(self, operation: str, parameters: dict) -> dict:
@@ -156,7 +207,7 @@ class DocumentSession:
                 raise ProtocolError('Document taskid must be a string')
             deadline = time.monotonic() + 180
             while time.monotonic() < deadline:
-                api = self._request('poll', {'taskid': taskid}, trace)
+                api = self._request('poll', {'taskid': taskid}, trace, deadline=deadline)
                 poll = object_value(api.get('long_task_poll'), 'long_task_poll')
                 if type(poll.get('done')) is not bool:
                     raise ProtocolError('long_task_poll.done must be a boolean')

@@ -18,9 +18,9 @@ const state = {
 let mod = null;
 let postTaskNative = null;
 let currentlyOn = null;
-// One SHA/base-bound script lifetime. Cache only successful executable checks;
+// One SHA/base-bound script lifetime. Capture mappings before posting UI work;
 // every live object's complete callback pointer table is still compared.
-const executableAddresses = new Set();
+let executableRanges = [];
 
 function emit(type, values = {}) { send({type, ...values}); }
 function checkpoint(stage, details = {}) {
@@ -44,12 +44,7 @@ function describe(error) { return String(error && error.stack ? error.stack : er
 function ensure(condition, message) { if (!condition) throw new Error(message); }
 function inModule(address) {
   if (address.compare(mod.base) < 0 || address.compare(mod.base.add(mod.size)) >= 0) return false;
-  const key = address.toString();
-  if (executableAddresses.has(key)) return true;
-  const range = Process.findRangeByAddress(address);
-  if (range === null || !range.protection.includes('x')) return false;
-  executableAddresses.add(key);
-  return true;
+  return executableRanges.some(range => address.compare(range.base) >= 0 && address.compare(range.end) < 0);
 }
 function fn(object, offset, result, args) {
   const address = object.add(offset).readPointer();
@@ -295,8 +290,13 @@ function initialize(layout, capture, scope) {
   ensure(scope.browser_id === null || Number.isInteger(scope.browser_id) && scope.browser_id > 0,
     'Invalid explicit browser selection');
   mod = Process.getModuleByName('libcef.dll');
-  executableAddresses.clear();
   ensure(mod.base.equals(ptr(capture.libcef_base)) && Process.id === capture.pid, 'CEF process/base changed');
+  checkpoint('module.executable-ranges.begin');
+  const rangeStartedAt = Date.now();
+  executableRanges = mod.enumerateRanges('--x').map(range => ({base: range.base, end: range.base.add(range.size)}));
+  ensure(executableRanges.length > 0, 'Checked CEF module has no executable mappings');
+  checkpoint('module.executable-ranges.end', {range_count: executableRanges.length,
+    enumeration_ms: Date.now() - rangeStartedAt});
   postTaskNative = new NativeFunction(mod.getExportByName('cef_post_task'), 'int', ['int', 'pointer']);
   currentlyOn = new NativeFunction(mod.getExportByName('cef_currently_on'), 'int', ['int']);
   Script.pin();

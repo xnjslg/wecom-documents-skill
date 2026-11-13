@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     for name in ('probe','snapshot','state','locate','apply','refresh','io','upload'):
         p=commands.add_parser(name)
         p.add_argument('--output',type=Path,help='A new output directory; default is a private unique run directory')
+        p.add_argument('--read-attempts', type=int, choices=(1, 2, 3), default=1,
+                       help='Attempts per discovery/read/poll request; default 1, opt-in retries wait 1 then 2 seconds')
         if name in ('snapshot','state','locate','apply','refresh'):
             p.add_argument('--doc-id',required=True)
         if name in ('state','locate','apply','refresh'):
@@ -55,7 +57,8 @@ def parse_args() -> argparse.Namespace:
         if name=='state':p.add_argument('--range',dest='ranges',type=gcp_range,action='append',default=[])
         if name=='locate':p.add_argument('--text-file',type=Path,required=True)
         if name=='apply':
-            p.add_argument('--script',type=Path,required=True,help='Reviewed JavaScript expression, not a historical task script')
+            p.add_argument('--script',type=Path,action='append',required=True,
+                           help='Reviewed expression file; repeat to execute batches in one editor connection')
             p.add_argument('--expected-version',type=int,required=True)
             p.add_argument('--before-sha256',required=True)
         if name=='io':
@@ -92,7 +95,7 @@ def main() -> int:
         raise RuntimeError('Windows PowerShell is unavailable')
     python = Path(sys.executable).resolve()
     runs = run_root()
-    job:dict[str,object]={'command':args.command}
+    job:dict[str,object]={'command':args.command, 'read_attempts':args.read_attempts}
     if getattr(args,'doc_id',None):job['docid']=args.doc_id
     if getattr(args,'browser_id',None):job['browser_id']=args.browser_id
     if args.command=='state':job['ranges']=args.ranges
@@ -101,10 +104,11 @@ def main() -> int:
         if not text:raise ValueError('Search source must be nonempty')
         job['text']=text
     if args.command=='apply':
-        script=args.script.read_text(encoding='utf-8')
-        if not script.strip() or len(script.encode('utf-16-le'))//2>16384:
-            raise ValueError('Expected a reviewed expression of 1..16384 UTF-16 units')
-        job.update(script=script,expected_version=args.expected_version,before_sha256=args.before_sha256.lower())
+        scripts=[path.read_text(encoding='utf-8') for path in args.script]
+        if any(not script.strip() or len(script.encode('utf-16-le'))//2>16384 for script in scripts):
+            raise ValueError('Each reviewed expression must contain 1..16384 UTF-16 units')
+        job.update({'script':scripts[0]} if len(scripts)==1 else {'scripts':scripts})
+        job.update(expected_version=args.expected_version,before_sha256=args.before_sha256.lower())
     if args.command=='io':
         request=json.loads(args.request.read_text(encoding='utf-8'))
         if not isinstance(request,dict):raise ValueError('The native request must be a JSON object')

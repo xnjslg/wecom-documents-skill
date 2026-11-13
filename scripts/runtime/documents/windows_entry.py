@@ -23,11 +23,12 @@ if str(BASE) not in sys.path:
 
 from client import ApiError, ProtocolError, REFERENCE_VERSION
 from documents.io import DocumentSession, ROUTES
+from documents.diagnostics import event
 
 COMMANDS = frozenset(('probe', 'snapshot', 'state', 'locate', 'apply', 'io', 'upload', 'refresh'))
 JOB_FIELDS = frozenset(('command', 'docid', 'output_windows', 'browser_id', 'ranges',
-                        'text', 'script', 'expected_version', 'before_sha256', 'operation', 'request',
-                        'kind', 'file_windows', 'python_windows'))
+                        'text', 'script', 'scripts', 'expected_version', 'before_sha256', 'operation', 'request',
+                        'kind', 'file_windows', 'python_windows', 'read_attempts'))
 
 
 class DocumentJobError(RuntimeError):
@@ -81,6 +82,7 @@ class Attempt:
             raise DocumentJobError('output_windows must be an existing absolute directory')
         self.state = {'command': job['command'], 'status': 'started', 'write_attempted': False}
         self.save('attempt.json', self.state)
+        event(self.output, 'job_started', command=job['command'], read_attempts=job.get('read_attempts', 1))
 
     def location(self, path: Path) -> str:
         return str(path)
@@ -95,6 +97,7 @@ class Attempt:
     def phase(self, status: str, **metadata: object) -> None:
         self.state.update(status=status, **metadata)
         (self.output / 'attempt.json').write_text(json.dumps(self.state, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        event(self.output, 'job_phase', **self.state)
 
 
 def payload_text(envelope: dict, kind: str) -> tuple[str, str]:
@@ -118,7 +121,7 @@ def take_snapshot(job: dict, attempt: Attempt, label: str, *, allow_partial: boo
     directory.mkdir(mode=0o700)
     metadata = {}
     errors = {}
-    with DocumentSession(pid, directory / 'native') as session:
+    with DocumentSession(pid, directory / 'native', read_attempts=job.get('read_attempts', 1)) as session:
         for kind in ('markdown', 'ooxml'):
             try:
                 envelope = session.call('read', {'docid': docid, 'content_type': kind})
@@ -221,9 +224,9 @@ def locate_expression(text: str) -> str:
     })()''')
 
 
-def cdp_value(response: dict) -> tuple[bool, object]:
+def cdp_value(response: dict, *, response_file: str = 'editor-response.json') -> tuple[bool, object]:
     if 'exceptionDetails' in response:
-        raise DocumentJobError('The editor expression raised an exception; inspect editor-response.json')
+        raise DocumentJobError(f'The editor expression raised an exception; inspect {response_file}')
     remote = response.get('result')
     if not isinstance(remote, dict):
         raise DocumentJobError('The editor did not return the observed CDP RemoteObject')
@@ -239,14 +242,14 @@ def read_state(cef, attempt: Attempt, name: str) -> dict:
     return value
 
 
-def wait_quiescent(cef, attempt: Attempt) -> dict:
+def wait_quiescent(cef, attempt: Attempt, *, prefix: str = '') -> dict:
     deadline = time.monotonic() + 30
     consecutive = 0
     previous_version = None
     index = 0
     while time.monotonic() < deadline:
         index += 1
-        value = read_state(cef, attempt, f'quiescent-{index:03d}.json')
+        value = read_state(cef, attempt, f'{prefix}quiescent-{index:03d}.json')
         if value['sync']['state'] == 'quiescent':
             consecutive = consecutive + 1 if value['version'] == previous_version else 1
             previous_version = value['version']
@@ -269,41 +272,74 @@ def cef_client(job: dict):
                              docid_value(job), browser_id=browser_id)
 
 
+def guarded_expression(script: str, version: int) -> str:
+    expression = ('(() => {if(window.App.collabCenterAdapter.getVersion()!==' + str(version) +
+                  ')throw new Error("Expected editor version changed before execution");return (\n' + script + '\n);})()')
+    if len(expression.encode('utf-16-le')) // 2 > 16384:
+        raise DocumentJobError('An edit expression including its version guard exceeds 16384 UTF-16 units')
+    return expression
+
+
 def apply_job(job: dict, attempt: Attempt) -> dict:
-    script = required_string(job, 'script')
+    if ('script' in job) == ('scripts' in job):
+        raise DocumentJobError('apply requires either script or scripts')
+    scripts = job.get('scripts') if 'scripts' in job else [job['script']]
+    if not isinstance(scripts, list) or not scripts or any(
+        not isinstance(script, str) or not script.strip() for script in scripts
+    ):
+        raise DocumentJobError('scripts must be a nonempty array of nonempty expressions')
     expected = job.get('expected_version')
     sha = required_string(job, 'before_sha256')
     if type(expected) is not int or expected < 0 or not re.fullmatch(r'[a-fA-F0-9]{64}', sha):
         raise DocumentJobError('apply requires an integer expected_version and a SHA-256 hex digest')
-    with (attempt.output / 'edit.js').open('x', encoding='utf-8', newline='') as stream:
-        stream.write(script)
-    attempt.phase('reading_before', expected_version=expected, expected_markdown_sha256=sha.lower())
+    # Validate every batch before any client call or mutation.
+    for script in scripts:
+        guarded_expression(script, expected)
+    multiple = len(scripts) > 1
+    for index, script in enumerate(scripts, 1):
+        name = f'batch-{index:03d}-edit.js' if multiple else 'edit.js'
+        with (attempt.output / name).open('x', encoding='utf-8', newline='') as stream:
+            stream.write(script)
+    attempt.phase('reading_before', expected_version=expected, expected_markdown_sha256=sha.lower(),
+                  batch_count=len(scripts), current_batch=None, completed_batches=0)
     before = take_snapshot(job, attempt, 'before')
     if before['markdown_sha256'] != sha.lower():
         raise DocumentJobError('Latest native Markdown SHA-256 differs from before_sha256; no edit submitted')
     attempt.phase('binding_editor')
+    results = []
     with cef_client(job) as cef:
-        state = read_state(cef, attempt, 'editor-before-state.json')
-        if state['version'] != expected:
-            raise DocumentJobError('Existing editor version differs from expected_version; no edit submitted')
-        if state['sync']['state'] != 'quiescent':
-            raise DocumentJobError('Existing editor has pending changes or is offline; no edit submitted')
-        guarded = ('(() => {if(window.App.collabCenterAdapter.getVersion()!==' + str(expected) +
-                   ')throw new Error("Expected editor version changed before execution");return (\n' + script + '\n);})()')
-        attempt.phase('editor_expression_submitted', write_attempted=True, browser_id=cef.browser_id)
-        response = cef.evaluate_document(guarded, timeout=30)
-        attempt.save('editor-response.json', response)
-        available, value = cdp_value(response)
-        result = value if available else {'editor_value_available': False}
-        result_path = attempt.save('result.json', result)
-        quiescent = wait_quiescent(cef, attempt)
+        for index, script in enumerate(scripts, 1):
+            prefix = f'batch-{index:03d}-' if multiple else ''
+            attempt.phase('checking_batch', current_batch=index, current_expected_version=expected)
+            state = read_state(cef, attempt, prefix + 'editor-before-state.json')
+            if state['version'] != expected:
+                raise DocumentJobError('Existing editor version changed; current batch was not submitted')
+            if state['sync']['state'] != 'quiescent':
+                raise DocumentJobError('Existing editor has pending changes or is offline; current batch was not submitted')
+            guarded = guarded_expression(script, expected)
+            attempt.phase('editor_expression_submitted', write_attempted=True, browser_id=cef.browser_id)
+            response = cef.evaluate_document(guarded, timeout=30)
+            attempt.save(prefix + 'editor-response.json', response)
+            available, value = cdp_value(response, response_file=prefix + 'editor-response.json')
+            result = value if available else {'editor_value_available': False}
+            result_path = attempt.save(prefix + 'result.json', result)
+            if multiple and isinstance(result, dict) and result.get('status') == 'stopped_needs_audit':
+                raise DocumentJobError('Current batch reported partial execution; inspect its result before continuing')
+            results.append({'batch': index, 'editor_value_available': available, 'result': result})
+            quiescent = wait_quiescent(cef, attempt, prefix=prefix)
+            expected = quiescent['version']
+            attempt.phase('batch_completed', completed_batches=index, final_editor_version=expected)
         browser_id = cef.browser_id
+    if multiple:
+        result_path = attempt.save('result.json', {'batches': results})
     # Native transport is opened only after all CEF references have drained.
+    attempt.save('editor-diagnostics.json', cef.diagnostics())
     attempt.phase('editor_closed_reading_after')
     after = take_snapshot(job, attempt, 'after')
     attempt.phase('written_needs_audit', final_editor_version=quiescent['version'])
     return {'ok': True, 'status': 'written_needs_audit', 'browser_id': browser_id,
-            'version': quiescent['version'], 'editor_value_available': available,
+            'version': quiescent['version'], 'editor_value_available': all(row['editor_value_available'] for row in results),
+            'batch_count': len(scripts), 'completed_batches': len(results),
             'result_json': attempt.location(result_path), 'before': before, 'after': after,
             'local_sync': quiescent, 'target_correctness_verified': False, 'outside_preservation_verified': False}
 
@@ -314,7 +350,7 @@ def execute_job(job: dict, attempt: Attempt) -> dict:
         return apply_job(job, attempt)
     if command == 'probe':
         pid = positive_pid('WECOM_DOCUMENT_AGENT_PID', required=True)
-        with DocumentSession(pid, attempt.output / 'native') as session:
+        with DocumentSession(pid, attempt.output / 'native', read_attempts=job.get('read_attempts', 1)) as session:
             capabilities = session.capabilities()
             binaries = session.client.binaries
         browser_pid = positive_pid('WECOM_DOCUMENT_BROWSER_PID', required=False)
@@ -336,7 +372,7 @@ def execute_job(job: dict, attempt: Attempt) -> dict:
         if docid is not None and 'docid' in request and request['docid'] != docid:
             raise DocumentJobError('io request.docid differs from job.docid')
         attempt.phase('native_request_submitted', write_attempted=operation in ('create', 'append', 'overwrite', 'import'), operation=operation)
-        with DocumentSession(positive_pid('WECOM_DOCUMENT_AGENT_PID', required=True), attempt.output / 'native') as session:
+        with DocumentSession(positive_pid('WECOM_DOCUMENT_AGENT_PID', required=True), attempt.output / 'native', read_attempts=job.get('read_attempts', 1)) as session:
             native = session.call(operation, request)
         path = attempt.save('result.json', native)
         return {'ok': True, 'status': 'native_response_saved', 'operation': operation,
@@ -353,7 +389,7 @@ def execute_job(job: dict, attempt: Attempt) -> dict:
         if kind == 'document-image':
             arguments['open_id'] = docid_value(job)
         attempt.phase('upload_submitted', write_attempted=True, upload_kind=kind)
-        with DocumentSession(positive_pid('WECOM_DOCUMENT_AGENT_PID', required=True), attempt.output / 'native') as session:
+        with DocumentSession(positive_pid('WECOM_DOCUMENT_AGENT_PID', required=True), attempt.output / 'native', read_attempts=job.get('read_attempts', 1)) as session:
             uploaded = session.tool('upload_doc_media' if kind == 'document-image' else 'upload_media', arguments)
         path = attempt.save('result.json', uploaded)
         return {'ok': True, 'status': 'upload_response_saved', 'kind': kind,
@@ -378,6 +414,7 @@ def execute_job(job: dict, attempt: Attempt) -> dict:
                 if not available or not isinstance(result, dict):
                     raise DocumentJobError('The requested editor read did not return an object value')
                 result['browser_id'] = cef.browser_id
+        attempt.save('editor-diagnostics.json', cef.diagnostics())
         path = attempt.save('result.json', result)
         summary = {'ok': True, 'status': 'refresh_requested' if command == 'refresh' else 'editor_read_saved',
                    'result_json': attempt.location(path), 'browser_id': result['browser_id']}
@@ -420,6 +457,10 @@ def main(argv: list[str] | None = None) -> int:
                 'For an interface incompatibility, the tested reference is WeCom '+REFERENCE_VERSION+
                 '; this is a troubleshooting reference, not a required version.')
         if attempt is not None:
+            summary['failed_phase'] = attempt.state['status']
+            for key in ('batch_count', 'current_batch', 'completed_batches'):
+                if key in attempt.state:
+                    summary[key] = attempt.state[key]
             failure = {'error_type': type(error).__name__, 'message': str(error), 'traceback': traceback.format_exc()}
             candidates = getattr(error, 'candidates', None)
             if isinstance(candidates, tuple) and all(is_dataclass(candidate) for candidate in candidates):

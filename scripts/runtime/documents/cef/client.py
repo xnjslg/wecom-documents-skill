@@ -59,6 +59,7 @@ class CefDocumentClient:
         self._checkpoint_received_at: float | None = None
         self._checkpoints: deque[dict[str, object]] = deque(maxlen=16)
         self._open_timings: dict[str, int] = {}
+        self._executable_mapping_count: int | None = None
         self._inventory_metadata: dict[str, object] = {}
         self._last_lifecycle: dict[str, object] | None = None
         self.initialization_timeout_diagnostics: dict[str, object] | None = None
@@ -82,6 +83,7 @@ class CefDocumentClient:
                 (time.monotonic() - self._checkpoint_received_at) * 1000)
             return {"browser_pid": self.browser_pid, "selected_browser_id": self.browser_id,
                     "timings_ms": dict(self._open_timings), "inventory": dict(self._inventory_metadata),
+                    "executable_mapping_count": self._executable_mapping_count,
                     "last_checkpoint": self.last_checkpoint, "last_checkpoint_age_ms": age,
                     "checkpoint_history": list(self._checkpoints),
                     "last_lifecycle": self._last_lifecycle}
@@ -103,6 +105,12 @@ class CefDocumentClient:
                         self.last_checkpoint = {key: value for key, value in payload.items() if key != "type"}
                         self._checkpoint_received_at = time.monotonic()
                         self._checkpoints.append(self.last_checkpoint)
+                        if payload.get("stage") == "module.executable-ranges.end":
+                            duration = payload.get("enumeration_ms")
+                            count = payload.get("range_count")
+                            if type(duration) is int and type(count) is int:
+                                self._open_timings["executable_ranges_ms"] = duration
+                                self._executable_mapping_count = count
                     elif kind == "lifecycle":
                         self._last_lifecycle = self._lifecycle_summary(payload)
                     elif kind == "ready":
