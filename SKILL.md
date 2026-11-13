@@ -5,7 +5,7 @@ description: 使用当前 Windows 企业微信登录会话读取、审阅、新�
 
 # 企微在线文档
 
-复用 Windows 企微登录会话，通过本机接口和客户端内部编辑器操作用户指定的文档。按实际接口能力执行，不以企微版本号作为准入条件。
+复用 Windows 企微登录会话，通过本机接口和客户端内部编辑器操作用户指定的文档。默认后台操作，按实际接口能力执行，不以企微版本号作为准入条件。
 
 执行所需的客户端连接脚本、排版模板和审计工具均随技能提供。运行环境为 Windows、已登录的企业微信，以及安装包内依赖的 64 位 Python 3.11+ 虚拟环境。支持加载 Skill 并执行本机脚本的客户端均可调用这些入口，不依赖特定 AI 客户端。环境配置见 [references/client-transport.md](references/client-transport.md)，先执行 `probe` 确认环境。
 
@@ -27,7 +27,9 @@ description: 使用当前 Windows 企业微信登录会话读取、审阅、新�
 - 需求审阅、文档对照、检查原生表格与文字样式，或准备局部编辑：用 `snapshot --doc-id '<docid>'` 保存 Markdown 与 OOXML，返回原始快照路径和正文 SHA-256。正文用于定位，样式用于判断条款含义，图片是否下载另按用户选择执行。
 - 定位编辑器、选区或版本：用 `state --doc-id '<docid>'`。这类编辑器操作才要求目标文档已打开；`DocumentNotOpenError` 不代表原生正文读取失败。
 
-`snapshot` 返回 `snapshot_saved` 表示两种格式齐全；`snapshot_partial`、`complete=false` 表示正文已核验保存，但后续 OOXML 请求失败。部分成功结果直接返回正文路径、SHA-256、缺失格式和错误记录，可继续用于只读审阅。编辑流程仍要求完整快照，处理方法见 [部分读取失败](references/document-io.md#部分读取失败)。
+`snapshot` 返回 `snapshot_saved` 表示两种格式齐全；`snapshot_partial`、`complete=false` 表示正文已核验保存，但后续 OOXML 请求失败。部分成功结果直接返回正文路径、SHA-256、缺失格式和错误记录，可继续用于只读审阅。`apply` 要求两种格式齐全；格式读取失败的补读与备用核验条件见 [部分读取失败](references/document-io.md#部分读取失败)。
+
+默认每次读取只尝试一次，失败即报告，不增加重试等待。再次调用前检查失败阶段、错误码及是否已经写入；只补读缺少的格式，不重复获取已成功的只读产物。可选短间隔重试见 [客户端传输](references/client-transport.md#能力检查与错误处理)。
 
 运行结果显示多个编辑器实例时，用返回的实际 `browser_id` 再查询其状态；选择内容、版本及目标范围均匹配的实例并记录选择。
 
@@ -61,6 +63,8 @@ description: 使用当前 Windows 企业微信登录会话读取、审阅、新�
 
 `apply` 在写入前检查快照与版本，写后保存原生回读。其返回 `written_needs_audit` 只表示写入与回读完成。继续核对目标内容、表格、图片、文字与样式，完成后才报告修改成功。
 
+同一文档的修改优先放入一次 `apply`。单条表达式能容纳时直接完成；需要分批时重复传入 `--script`，按顺序复用同一编辑器连接，整项任务前后各保存一次完整快照。每批检查版本、目标文字和范围，插入删除后重新定位后续目标。命令示例、进度文件及失败恢复见 [连续批次与失败恢复](references/formatting.md#连续批次与失败恢复)。
+
 `scripts/audit_outside.py` 比较明确允许修改的节点以外的完整树；排除节点需另核对内容和格式。它报告的是外部是否保留，不替代目标正确性验证。局部编辑不通过全文 Markdown 覆盖完成：已实测该读取格式会把表格展开为普通文本。
 
 内部复制等未改变正文的调用，可不传排除路径，比较完整文档。
@@ -70,6 +74,7 @@ description: 使用当前 Windows 企业微信登录会话读取、审阅、新�
 ## 按内容选择路径
 
 - 标题、文字样式、段落重排、列表、表格及原生代码块：读 [references/formatting.md](references/formatting.md)。使用 `format`、`insert-table`、`codeblock` 模板，按当前文档结构局部操作；整篇重排先确定样式规则和目标节点，再分批应用。
+- 已有表格居中、过宽或段落零散，需要调整布局或整合内容：补读 [references/reflow.md](references/reflow.md)，核对表宽、原生段落标记、超链接字段和段内强调样式。
 - 流程图、代码框替换为图片：读 [references/flowcharts.md](references/flowcharts.md)。企微独立流程图可以导入 Mermaid，Word 文档中的普通代码框需采用已验证的局部图片替换。
 - 数学公式：读 [references/math.md](references/math.md)。优先原生 OMath，保留可编辑性、上下标和正体文字；独立公式保持原有独立段落。
 - 读取、新建、追加、导入文件与上传文档图片：读 [references/document-io.md](references/document-io.md)。图片上传需绑定目标 `open_id=docid`。
